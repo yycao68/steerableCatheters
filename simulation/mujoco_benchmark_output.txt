@@ -1,0 +1,37 @@
+========================================================================
+Impedance-MPC catheter benchmark — MuJoCo PRB plant (d_tend=2.5 mm)
+  measured Lambda=3.495e-03  J_k=0.087  k_eff=8.4 N/m  F_safe=0.5 N  ctrl=500 Hz
+  Lambda-rescaled gains Kd=3.15 Dd=0.210; FF cancels k_eff
+========================================================================
+  Controller                  ApprRMS  maxF(N)  viol  HoldErr
+  (mm except force)
+  ----------------------------------------------------------
+  Classical impedance           0.284    0.169    no    1.477
+  Impedance MPC (no FC)         0.028    0.595   YES    1.410
+  Impedance MPC (with FC)       0.028    0.467    no    1.411
+  Joint-space PD                1.822    0.000    no    3.759
+
+  Cardiac safety mode (Impedance MPC + FC, position tracking):
+    wall condition                            ApprRMS  maxF(N)  viol
+    static wall (baseline)                      0.028    0.467    no
+    0.3 mm @ 1 Hz                               0.028    0.468    no
+    0.5 mm @ 1.2 Hz + 0.2 mm noise              0.060    0.466    no
+
+  Force-regulation mode (sensor-free, target F_des=0.2 N), reg window [1.8,2.5]s:
+    idealized (no cardiac / noise)                   force RMSE = 141.9 mN, peak 0.347 N
+    realistic (0.3 mm cardiac @1 Hz + 0.2 mm noise)  force RMSE = 166.6 mN, peak 0.434 N
+    [ref] Jolaei et al. sensor-free: 30-50 mN ;  Kesner & Howe: ~80 mN (hardware)
+
+  Contact-normal misalignment (Sec. V-E), F_safe=0.5 N:
+     theta  1/cos |      nominal cap   | cos(30 deg)-tightened
+                  |   worstF   realFviol|    worstF   realF viol
+       0 deg  1.000 |    0.500   0.467  no|     0.433   0.397   no
+      10 deg  1.015 |    0.508   0.474 YES|     0.440   0.403   no
+      20 deg  1.064 |    0.532   0.497 YES|     0.461   0.422   no
+      30 deg  1.155 |    0.577   0.539 YES|     0.500   0.458   no
+    -> worst-case true tissue force = cap/cos(theta): nominal breaches 0.5 N for
+       theta>0 (0.577 N at 30 deg); cos(30 deg)-tightened holds it <= 0.5 N for all
+       theta <= 30 deg, with realized peaks well under the certificate.
+
+  figure -> catheter_results.png
+  figure -> catheter_cardiac.png

@@ -1,0 +1,571 @@
+\begin{abstract}
+Safe steerable catheter control is fundamentally a problem of interaction dynamics: the tip must follow a planned motion, remain compliant against moving tissue, reject friction and hysteresis, and respect a clinically meaningful never-exceed contact-force bound. We formulate catheter--tissue interaction dynamics in the scalar tip-normal coordinate of a single-segment single-tendon catheter. A partial-physics feedforward cancels only the reliable nominal bending dynamics, exposing a configuration-invariant linear interaction-dynamics model whose input gain varies through the scalar catheter inertia. A predictive optimizer then regulates this interaction state subject to hard contact-force, tendon-force, and curvature constraints. An augmented Kalman filter compresses contact, friction, and modeling error into one sensor-free disturbance state, giving nominal offset-free regulation in free space while leaving force safety to the explicit constraint. The unconstrained and disturbance-free limit recovers classical catheter impedance as a special realization of the same interaction dynamics, rather than as the main design object. In a MuJoCo distributed-compliance simulation of an eight-link tendon-driven catheter, disturbance augmentation cuts free-space approach error by 90\%, and only the force-constrained predictive interaction-dynamics controller reconciles tracking with the 0.5\,N bound: the unconstrained controller drives contact force to 0.60\,N against a penetrating target, while the constrained one holds 0.47\,N at identical tracking. These results show that offset-free motion regulation and contact-force safety are coupled interaction-dynamics objectives, and that the explicit predictive constraint resolves their tension under stiff tissue contact. The bound also holds under $0.5$\,mm, $1.2$\,Hz cardiac motion. Hardware validation is future work.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Steerable catheter, continuum robot, interaction dynamics, predictive control, Kalman filter, contact-force safety, offset-free regulation, cardiac ablation.
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+\subsection{Clinical Motivation}
+
+\IEEEPARstart{S}{teerable} catheters are the primary tool for cardiac electrophysiology (EP) procedures including radiofrequency ablation, where the tip must be positioned precisely at target tissue while maintaining controlled, stable contact. The central control problem is therefore not merely tip tracking and not merely force regulation; it is the regulation of \emph{catheter--tissue interaction dynamics}. The interaction state must encode how the tip moves relative to tissue, how persistent friction and contact forces bias that motion, and how safety limits reshape what motion is physically allowable.
+
+Existing methods regulate these interaction dynamics through different mechanisms. Classical impedance control~\cite{hogan1985} shapes the tip port as a virtual mechanical impedance $Z(s) = M_d s^2 + D_d s + K_d$, providing passive compliance without an explicit contact model. It is an important interaction-dynamics realization, but three limitations matter clinically: \textbf{(i)}~the contact-force safety bound $\|F_{\text{tip}}\| \le F_{\text{safe}}$ is not enforced as a prediction-horizon constraint; \textbf{(ii)}~persistent contact force produces a steady-state tip error $e_\infty = K_d^{-1} F_{\text{contact}}$; and \textbf{(iii)}~the controller cannot anticipate trajectory curvature, impending contact, or force saturation.
+
+\subsection{Challenges Specific to Catheters}
+
+Catheters present challenges absent in rigid-body robots. \emph{Model uncertainty:} the mechanics follow a variant of the Cosserat rod equations~\cite{antman1995,rucker2011}, with distributed elasticity, sheath friction, tendon backlash, and hysteresis that vary widely across specimens, making full-model inversion impractical. \emph{Cardiac motion:} the heart moves ${\sim}10$--15\,mm per cycle at ${\sim}1$\,Hz; after gross target tracking, the local residual wall-normal motion still produces quasi-periodic contact-force disturbances with known frequency but unknown phase and amplitude. \emph{Limited sensing:} most clinical catheters carry no force sensor; tip position is available via electromagnetic (EM) tracking, fluoroscopy, or intracardiac echocardiography at moderate latency (10--50\,ms). \emph{Safety criticality:} a perforation force threshold of ${\sim}0.3$--0.5\,N is clinically relevant~\cite{yokoyama2008}, making hard force-constraint enforcement---not soft penalization---essential.
+
+\subsection{Related Work}
+
+\emph{Catheter and continuum-robot control} has progressed from PID and Jacobian-based kinematic regulation~\cite{camarillo2008,yip2014} to model-less feedback~\cite{yip2014} and predictive interaction-dynamics optimization. Cosserat-based predictive control can model rich catheter dynamics but requires online nonlinear-program solution, limiting update rates to ${\sim}10$--20\,Hz. Constant-curvature kinematics~\cite{webster2010} underlie most reduced-order interaction models. Learning-based approaches improve robustness to model uncertainty but usually do not provide formal stability or hard interaction-constraint guarantees.
+
+\emph{Sensor-free contact-force control} is a directly relevant line. Jolaei \emph{et al.}~\cite{jolaei2020} regulate the contact force of a tendon-driven ablation catheter \emph{without a force sensor} via position control plus a displacement-based viscoelastic contact model (0.03--0.05\,N RMS), and Kesner and Howe~\cite{kesner2014} combine ultrasound guidance with force control on a moving cardiac target (${\sim}0.08$\,N RMS). These works regulate one component of the interaction dynamics---force---to a setpoint. The present framework instead treats force as a hard never-exceed interaction-dynamics constraint while regulating the tip-motion state, a complementary objective (Section~\ref{sec:compare}).
+
+\emph{Virtual-impedance interaction shaping} has been demonstrated for catheter tip-force regulation with empirically tuned parameters. In the terminology of this paper, impedance is one way to realize interaction dynamics, but the configuration-dependent effective inertia and compliance are typically not addressed, giving inconsistent behavior across the workspace.
+
+\emph{Disturbance rejection in flexible robots} can also be interpreted as interaction-dynamics regulation. Active disturbance rejection control (ADRC) and its extended state observer~\cite{han2009} lump unknown dynamics into an estimated disturbance state. The connection to offset-free predictive control~\cite{pannocchia2003,maeder2009} provides a formal framework for combining disturbance estimation with constraint-aware interaction optimization~\cite{rawlings2017}.
+
+\emph{Base framework.} This work builds on the interaction-dynamics framework introduced for redundant-manipulator physical human--robot interaction~\cite{cao2026phri}: nonlinear robot dynamics are transformed into a configuration-invariant linear interaction model, then regulated by predictive optimization with disturbance augmentation and safety constraints. We carry that hierarchy---Interaction Dynamics $\rightarrow$ Configuration-Invariant Dynamics $\rightarrow$ Predictive Optimization---to the steerable-catheter setting, addressing the catheter-specific challenges of single-DOF actuation, severe model uncertainty, and hard contact-force safety.
+
+The contributions of this paper are:
+
+\textbf{Correct single-DOF formulation.} A single-tendon catheter has one controllable DOF (the curvature); we control the scalar 
+tip-normal coordinate, avoiding the common over-parameterization that treats the 2-D tip as independently actuable.
+
+\textbf{Configuration-invariant interaction dynamics.} The partial-physics feedforward cancels only the \emph{known} 
+nominal stiffness and damping, reformulating the uncertain catheter mechanics into a configuration-invariant linear interaction-dynamics model. The double integrator is the resulting model, not the contribution itself; the residual is absorbed by the disturbance state. Under the \emph{Disturbance Compression Principle} 
+(Remark~\ref{rmk:compress}) the estimator tracks only the observer-accessible low-frequency projection $\mathcal{P}_{\mathcal D}(\Delta)$ 
+of the residual, so $\dot d=0$ is an equivalent-disturbance model, not a physical claim---making one integrator state legitimate across 
+friction, contact, and cardiac effects.
+
+\textbf{Predictive interaction-dynamics optimization.} We establish (Theorem~\ref{thm:equiv}) that the unconstrained, disturbance-free realization recovers the classical catheter impedance law while the constrained predictive realization adds offset-free rejection and explicit interaction-constraint enforcement.
+
+\textbf{Hard interaction-dynamics constraints.} The QP enforces the predicted tip-normal force bound over the horizon through 
+the tendon-to-tip transmission, together with tendon and curvature limits.
+
+\textbf{Honest characterization.} Simulation on a distributed-compliance physics plant shows prediction's dominant benefit is 
+\emph{interaction-constraint enforcement}, that offset-free rejection helps mainly in free space, and that offset-free motion regulation \emph{without} 
+a force constraint still breaches the safety bound (far milder on the compliant catheter than a stiff lumped model predicts, but breached).
+
+\section{Interaction Dynamics Formulation}\label{sec:model}
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[scale=1.0,every node/.style={font=\footnotesize}]
+  % tendon actuator (control input u)
+  \node[draw,fill=gray!15,minimum width=9mm,minimum height=8mm] (act) at (-2.85,0) {};
+  \node[align=center,font=\scriptsize] at (-2.85,0) {tendon\\actuator};
+  \draw[sig] (-2.3,0.32)--(-1.6,0.32);
+  \node[above,font=\scriptsize] at (-1.95,0.34) {disp.\ $u$};
+  % proximal sheath (straight) then bending segment (arc, curvature kappa)
+  \draw[line width=3pt,gray!70,line cap=round] (-2.4,0)--(0,0);
+  \draw[line width=3pt,gray!70,line cap=round] (0,0) arc (270:360:1.8);
+  \node[below,font=\scriptsize] at (-1.2,-0.12) {proximal sheath};
+  % tendon routed along the concave (inner) side of the bend
+  \draw[line width=0.9pt] (0,0.2) arc (270:360:1.6);
+  \node[font=\scriptsize,align=left] at (0.95,0.55) {tendon\\(force, $u$)};
+  % bending dynamics label (outside the curve)
+  \draw[sig,gray] (2.55,0.55)--(1.45,0.62);
+  \node[right,font=\scriptsize,align=left] at (2.5,0.55) {bending segment\\ $L,\;\kappa$; \ $M,C,K$};
+  % radius of curvature R = 1/kappa
+  \node[font=\scriptsize] at (0,1.8) {$+$};
+  \draw[dashed] (0,1.8)--(1.8,1.8);
+  \draw[dashed] (0,1.8)--(0,0);
+  \node[above,font=\scriptsize] at (0.75,1.84) {$R=1/\kappa$};
+  \draw[-{Latex[length=1.3mm]}] (0,1.0) arc (270:355:0.8);
+  \node[font=\scriptsize] at (0.42,1.28) {$\kappa L$};
+  % catheter tip (position p, normal coordinate y)
+  \node[tip] (T) at (1.8,1.8){};
+  \node[right,font=\scriptsize,align=left] at (2.02,1.55) {tip $p$,\\ $y=n^\top p$};
+  % tip-normal direction n into the wall
+  \draw[sig] (1.5,1.9)--(1.5,2.42);
+  \node[right,font=\scriptsize] at (1.54,2.27) {$n$};
+  % tissue wall (Kelvin--Voigt), hatched
+  \fill[pattern=north east lines,pattern color=gray] (0.6,2.45) rectangle (3.0,2.67);
+  \draw[line width=0.8pt] (0.6,2.45)--(3.0,2.45);
+  \node[above,font=\scriptsize] at (1.8,2.69) {tissue wall ($k_t,b_t$)};
+  % contact / normal force F_n on the tip (red)
+  \draw[dist] (2.2,2.43)--(2.2,1.9);
+  \node[red!75,right,font=\scriptsize] at (2.25,2.2) {$F_n\le F_\text{safe}$};
+  % lumped disturbance annotation
+  \node[font=\scriptsize,align=center] at (-0.6,-0.62)
+        {friction, backlash, hysteresis, contact $\Rightarrow d_\text{cat}$};
+\end{tikzpicture}}
+\caption{Single-segment tendon-actuated catheter plant, mapping the variables
+of this section onto the physical parts: tendon displacement $u$ (control
+input) drives the curvature $\kappa$ of a length-$L$ bending segment with
+effective bending inertia $M$, damping $C$, and hysteretic stiffness $K$
+\eqref{eq:plant}; the constant-curvature arc has radius $R=1/\kappa$ and
+subtends $\kappa L$. The tip position $p$ and its controlled normal coordinate
+$y=n^\top p$ press on a Kelvin--Voigt tissue wall ($k_t,b_t$), producing the
+normal contact force $F_n$ held under the hard safety bound $F_\text{safe}$.
+Sheath friction, tendon backlash, hysteresis, and contact are lumped into the
+disturbance $d_\text{cat}$, compressed by the augmented Kalman estimator into
+the observed state $d$ (Remark~\ref{rmk:compress}).}
+\label{fig:plant}
+\end{figure}
+
+\subsection{Catheter Mechanics and Degrees of Freedom}
+
+Consider a planar single-segment tendon-actuated catheter; tip position $p \in \mathbb{R}^2$ is set by tendon displacement $u \in \mathbb{R}$ (positive pull gives curvature $\kappa > 0$). The dominant bending dynamics take the rigid-body-analogous form
+\begin{equation}
+M(\kappa)\ddot{\kappa} + C(\kappa,\dot\kappa)\dot{\kappa} + K(\kappa) = u + d_{\text{cat}},
+\label{eq:plant}
+\end{equation}
+with effective bending inertia $M$, damping $C$, nonlinear (hysteretic) stiffness $K$, and a lumped term $d_{\text{cat}}$ collecting tissue contact, friction, backlash, and hysteresis. This equation is not used as a full Cosserat model; it is the starting point for constructing a low-dimensional interaction-dynamics state. The correspondence $\kappa\leftrightarrow q$, $K\leftrightarrow G$ bridges to the configuration-invariant interaction-dynamics framework established for redundant manipulators in physical human--robot interaction~\cite{cao2026phri}; the present paper specializes that hierarchy to the single-DOF catheter setting.
+
+\emph{Degrees of freedom.} With a single tendon, the only controllable coordinate is $\kappa$; the tip pose $p(\kappa)$ traces a one-parameter curve, so the two tip coordinates are \emph{not} independently actuable---only motion along the Jacobian direction $J_\kappa$ is. We therefore control a scalar coordinate (the curvature, or equivalently the tip displacement $y$ along the contact normal) and recover the 2-D pose through the kinematics of Section~\ref{sec:kin}.
+
+\begin{remark}[Disturbance Compression Principle]\label{rmk:compress}
+The true residual after partial-physics cancellation, $\Delta(t)=f_{\text{real}}-f_{\text{nominal}}$, superposes effects on disparate timescales---quasi-static sheath friction and hysteresis, fast tissue contact, and ${\sim}1$\,Hz quasi-periodic cardiac loading. We do \emph{not} claim a single integrator physically \emph{represents} all of these. Rather, the augmented estimator realizes the projection
+\begin{equation}
+d \;=\; \mathcal{P}_{\mathcal D}(\Delta),
+\label{eq:compress}
+\end{equation}
+onto the \emph{observer-accessible} subspace $\mathcal D$---the low-frequency band set by the Kalman bandwidth and the integrating internal model. The model $\dot d=0$ is thus a statement about $\mathcal{P}_{\mathcal D}(\Delta)$, the \emph{equivalent} disturbance the observer can track and the MPC reject offset-free, not about the physics of $\Delta$. Components \emph{outside} $\mathcal D$---the fast contact-onset transient, an unpredicted cardiac harmonic---are handled instead by the hard force constraint (\S\ref{sec:verify}(4)) or an enlarged internal model (\S\ref{sec:ddot}, Option~B). This makes ``model only what is observed and slowly varying'' a precise design rule: partial cancellation need only move the dominant part of $\Delta$ into $\mathcal D$, and the offset-free guarantee then applies to $\mathcal{P}_{\mathcal D}(\Delta)$ exactly. We call this the \emph{Disturbance Compression Principle}; it lets a deliberately reduced model \eqref{eq:plant} of an infinite-dimensional Cosserat system carry a formal offset-free guarantee.
+\end{remark}
+
+\subsection{Tip Kinematics}\label{sec:kin}
+
+For a constant-curvature arc of length $L$,
+\begin{equation}
+p_x = \frac{\sin(\kappa L)}{\kappa},\qquad p_z = \frac{1-\cos(\kappa L)}{\kappa},
+\label{eq:kin}
+\end{equation}
+with continuous limits $p_x\to L$, $p_z\to0$ as $\kappa\to0$. Let $J_\kappa(\kappa)=dp/d\kappa\in\mathbb{R}^{2\times1}$ be the translational Jacobian and let $n$ be the controlled tip-normal direction. The scalar normal coordinate is $y=n^\top p$, with
+\begin{align}
+J_n(\kappa)
+&=\frac{dy}{d\kappa}=n^\top J_\kappa(\kappa),\\
+\Lambda_n(\kappa)
+&=\left(J_n(\kappa)M^{-1}(\kappa)J_n(\kappa)\right)^{-1}>0,
+\label{eq:JnLambda}
+\end{align}
+away from configurations where $J_n=0$. This scalar operational-space inertia normalizes the effective tip impedance in the controllable direction.
+
+\subsection{Contact Model and the Force-Safety Interaction Constraint}
+
+During contact, a tip force $F_{\text{tip}}$ acts at the tip; in simulation the tissue is Kelvin--Voigt, $F_{\text{tissue}} = k_t\delta + b_t\dot\delta$, with penetration $\delta=\max(0,p_{\text{surf}}-p)$, tissue stiffness $k_t\approx 2$--20\,kN/m, and damping $b_t$. The contact maps to curvature through virtual work, $\tau_{\text{ext}}=J_\kappa^\top F_{\text{tip}}$; along the controlled normal this reduces to $\tau_{\text{ext}}=J_n F_n$, where $F_n=n^\top F_{\text{tip}}$. The clinically relevant perforation threshold $F_{\text{safe}}\approx 0.5$\,N~\cite{yokoyama2008} motivates a hard predicted normal-force bound, $|F_n(t)|\le F_{\text{safe}}$, with additional approach-velocity limits needed for environment-induced impact transients (Section~\ref{sec:verify}).
+
+\subsection{Interaction-Dynamics Objective}
+
+Given a reference $(p_d,\dot p_d,\ddot p_d)$, define the scalar interaction state $x=[e,\dot e]^\top$, where $e=y_d-y$ is the error in the controllable normal coordinate. This state characterizes the regulated catheter--tissue interaction dynamics: motion error, velocity error, persistent unknown loading, and the constraints that limit allowable contact. The objective is to choose $u(t)$ so $e(t)\to0$ in the nominal free-space limit while respecting tendon limits $u_{\text{lo}}\le u\le u_{\text{hi}}$, predicted normal-force safety $|F_n|\le F_{\text{safe}}$, and curvature limits $\kappa_{\text{lo}}\le\kappa\le\kappa_{\max}$ under bounded unknown contact, friction, and hysteresis.
+
+\section{Predictive Interaction Dynamics Control}\label{sec:design}
+
+The control architecture has two layers:
+\begin{equation}
+u = \underbrace{u_{\text{ff}}}_{\text{Layer 1: interaction-dynamics normalization}} + \underbrace{J_n F_{\text{mpc}}}_{\text{Layer 2: predictive correction}},
+\label{eq:twolayer}
+\end{equation}
+with feedforward $u_{\text{ff}} = \hat C(\kappa,\dot\kappa)\dot\kappa + \hat K(\kappa) + J_n\Lambda_n(\kappa)\ddot y_d$ canceling the \emph{nominal} dynamics. In the single-DOF setting $F_{\text{mpc}}\in\mathbb{R}$ is the scalar corrective force along the controlled tip-normal; the transmitted generalized input is $J_nF_{\text{mpc}}$, dimensionally consistent with $u$. In the remainder we write $J_n$ for the scalar normal Jacobian and reserve $J_\kappa$ for the full translational Jacobian. For a rigid robot Layer~1 is exact; for a catheter $\hat C,\hat K$ are uncertain, so the cancellation is partial and the residual is absorbed by the disturbance estimate---more robust than inverting an unreliable model.
+
+Since the system is single-DOF (Section~\ref{sec:model}), the error $e=y_d-y$ and the corrective input $F_{\text{mpc}}\in\mathbb{R}$ are scalar. With $x_e=[e,\dot e]^\top\in\mathbb{R}^2$,
+\begin{equation}
+\dot x_e = \underbrace{\begin{bmatrix}0&1\\0&0\end{bmatrix}}_{A_c\,(\text{const})} x_e + \underbrace{\begin{bmatrix}0\\-\Lambda_n^{-1}(\kappa)\end{bmatrix}}_{B_c(\kappa)} F_{\text{mpc}} + \underbrace{\begin{bmatrix}0\\1\end{bmatrix}}_{E_c\,(\text{const})} d(t),
+\label{eq:errdyn}
+\end{equation}
+where $d$ lumps modeling error, contact, and the kinematic coupling $\dot J_n\dot\kappa$, normalized to acceleration units. This is the key configuration-invariant interaction-dynamics model: $A_c$ is \textbf{constant}, while only the scalar gain $B_c(\kappa)$ varies through $\Lambda_n(\kappa)$. The double integrator is the resulting normalized interaction model, not the main claim. The same constant-$A_d$, parameter-varying-$B_d$ structure exploited in the base framework~\cite{cao2026phri} and, earlier, in min--max MPC under input saturation~\cite{cao2005minmax}, enables offline precomputation of the prediction matrices. Because $A_c$ is nilpotent, the exact ZOH discretization is closed-form:
+\begin{equation}
+A_d=\begin{bmatrix}1&\Delta t\\0&1\end{bmatrix},\quad B_d(\kappa_k)=\begin{bmatrix}-\tfrac12\Lambda_n^{-1}(\kappa_k)\Delta t^2\\-\Lambda_n^{-1}(\kappa_k)\Delta t\end{bmatrix}.
+\label{eq:disc}
+\end{equation}
+
+Augment with a scalar integrating disturbance $\hat d\in\mathbb{R}$:
+\begin{equation}
+\begin{bmatrix}x_{e,k+1}\\\hat d_{k+1}\end{bmatrix}=\begin{bmatrix}A_d&G_d\\0&1\end{bmatrix}\begin{bmatrix}x_{e,k}\\\hat d_k\end{bmatrix}+\begin{bmatrix}B_d(\kappa_k)\\0\end{bmatrix}F_{\text{mpc},k},
+\label{eq:aug}
+\end{equation}
+with $G_d=[\tfrac12\Delta t^2,\Delta t]^\top$ the ZOH of $E_c$---\textbf{distinct from} $B_d$, which carries the $-\Lambda_n^{-1}$ input gain ($d$ is in acceleration units, so $G_d$ is not $\Lambda_n^{-1}$-scaled). A steady-state Kalman filter estimates $\hat d$ from tip-error measurements; the pair is observable with $C_{\text{aug}}=[I_2,0]$ since $G_d\neq 0$. No force sensor is required.
+
+A predictive interaction-dynamics QP can be constructed from the augmented dynamics \eqref{eq:aug} and an input-centered cost. For a frozen or predicted inertia sequence, let
+$U_d(\hat d)=[\Lambda_{n,0}\hat d,\ldots,\Lambda_{n,N-1}\hat d]^\top$ be the steady force sequence that cancels the estimated acceleration disturbance in \eqref{eq:errdyn}. The condensed QP is
+\begin{equation}
+\min_{U}\ \tfrac12 U^\top H\,U
++ \Big(\Gamma^\top\bar Q\big(\Phi x_{e,k}+\Delta(\hat d)\big)-\bar R U_d(\hat d)\Big)^\top U,
+\label{eq:qp}
+\end{equation}
+with $U=[F_{\text{mpc},0};\ldots;F_{\text{mpc},N-1}]\in\mathbb{R}^N$, $H=\Gamma^\top\bar Q\Gamma+\bar R$, $Q=\text{diag}(K_d,D_d)$, and $\Phi\in\mathbb{R}^{2N\times2}$, $\Gamma$ precomputed once (constant $A_d$). When no interaction constraint is active the solution is the closed form
+\begin{equation}
+U^\star=-H^{-1}\!\left[\Gamma^\top\bar Q\big(\Phi x_e+\Delta(\hat d)\big)-\bar R U_d(\hat d)\right],
+\label{eq:unconstrained_centered}
+\end{equation}
+a matrix--vector multiply. With constant $\Lambda_n$ over the horizon, $\Delta(\hat d)+\Gamma U_d(\hat d)=0$, so the change of variables $V=U-U_d$ reduces the optimizer to the nominal interaction-dynamics regulator in $V$. When a constraint binds, OSQP~\cite{osqp} solves the condensed QP reusing the cached factorization. The minimization is subject to tendon limits, curvature limits, and the contact-force interaction bound.
+
+\emph{Force-safety interaction constraint.} The corrective input $F_{\text{mpc}}$ is the tip-normal force, and the two-layer command is realized as the tendon tension $T_k=-(u_{\text{ff},k}+F_{\text{mpc},k})/J_n(\kappa_k)$ with the tip-space elastic feedforward $u_{\text{ff}}=k_{\text{eff}}\,y_d$ ($J_n$ bounded away from zero; Section~\ref{sec:compare}). The predicted normal contact force---the applied tip force beyond the catheter's own elastic restoring---is then
+\begin{equation}
+\hat F_{n,k}=J_n(\kappa_k)\,|T_k|-k_{\text{eff}}\,|y_k|=k_{\text{eff}}\,e_k+F_{\text{mpc},k},
+\label{eq:force_map}
+\end{equation}
+with any calibrated free-space friction bias absorbed into the disturbance estimate $\hat d$ (Remark~\ref{rmk:compress}). Because the compliant elastic term $k_{\text{eff}}e_k$ is small over the workspace ($|k_{\text{eff}}e_k|\ll F_{\text{safe}}$), the hard predicted-force bound $|\hat F_{n,k}|\le F_{\text{safe}}$ is enforced to leading order by the box constraint on the corrective force,
+\begin{equation}
+-F_{\text{safe}}\le F_{\text{mpc},k}\le F_{\text{safe}},
+\label{eq:force_constraint}
+\end{equation}
+applied directly in the QP. This bounds the controller-induced/predicted quasi-static normal force; fast environment-induced damping spikes are handled by approach-velocity limits (Section~\ref{sec:verify}).
+
+\begin{theorem}[LQR--impedance equivalence]\label{thm:equiv}
+In the unconstrained, disturbance-free limit ($d\equiv0$, no active constraints) the receding-horizon law is the static linear state feedback $F_{\text{mpc}}=K_{\text{eff}}\,e+D_{\text{eff}}\,\dot e$---the LQR-realized instance of the classical catheter impedance law $u_{\text{imp}}=\hat C\dot\kappa+\hat K+J_n(K_{\text{eff}}e+D_{\text{eff}}\dot e)$, realizing the effective tip-normal impedance $Z_{\text{eff}}(s,\kappa)\approx\Lambda_n(\kappa)s^2+D_{\text{eff}}s+K_{\text{eff}}$---where the \emph{realized} gains $(K_{\text{eff}},D_{\text{eff}})$ are the unconstrained LQR feedback for the weights $(Q,R)$. The unconstrained predictive interaction controller is therefore an LQR-tuned classical impedance, with the realized gains the Riccati image of the cost weights (Remark~\ref{rmk:realized}); it is \emph{not} a free rendering of a prescribed $(K_d,D_d)$ (following~\cite{cao2026phri}, Theorem~1).
+\end{theorem}
+
+\begin{IEEEproof}[Proof sketch]
+Without constraints and with $d\equiv0$ the QP minimizer is the unconstrained stationary point $U^\star=-H^{-1}\Gamma^\top\bar Q\,\Phi x_e$, whose first block is a static gain $F_{\text{mpc}}=K_{\text{eff}}e+D_{\text{eff}}\dot e$; with the DARE terminal cost this is the infinite-horizon LQR feedback for $(Q,R)$, independent of $N$. After Layer-1 cancellation the residual plant is $\ddot e=-\Lambda_n^{-1}(\kappa)F_{\text{mpc}}+d$; multiplying by $\Lambda_n(\kappa)$ gives $\Lambda_n\ddot e+D_{\text{eff}}\dot e+K_{\text{eff}}e=\Lambda_n d$, the stated impedance, and adding the feedforward $u_{\text{ff}}=\hat C\dot\kappa+\hat K+J_n\Lambda_n\ddot y_d$ recovers $u_{\text{imp}}$. When constraints are active or $d\neq0$, the MPC departs from this static law---precisely its advantage.
+\end{IEEEproof}
+
+\begin{remark}[Prescribed vs.\ realized gains]\label{rmk:realized}
+The cost weights $Q=\text{diag}(K_d,D_d)$, $R$ are design \emph{penalties}; the realized impedance $(K_{\text{eff}},D_{\text{eff}})$ is their LQR (Riccati) image, so in general $(K_{\text{eff}},D_{\text{eff}})\neq(K_d,D_d)$---in particular the cheap-control limit $R\to0$ yields a plant-determined gain, not $(K_d,D_d)$. To render a \emph{specific} $(K_d,D_d)$ exactly, prescribe the impedance gain directly ($F_{\text{mpc}}=K_d e+D_d\dot e$), making the equivalence exact at the cost of the predictive look-ahead (cf.~\cite{cao2026phri}, Remark~2).
+\end{remark}
+
+\section{Stability Analysis}\label{sec:stability}
+
+\begin{theorem}[Nominal stability]\label{thm:nominal}
+With terminal cost $Q_f$ the DARE solution at a nominal configuration $\kappa_0$, if the QP is feasible at $k=0$ and the LPV variation $\|B_d(\kappa_k)-B_d(\kappa_0)\|$ is sufficiently small---quantified for this scalar plant in closed form as $\rho=\Lambda_{n,\text{ref}}/\Lambda_{n,\text{true}}<\rho^\star\approx3.4$ (Proposition~\ref{prop:lpv}, derived in Appendix~\ref{app:lpv}), comfortably satisfied by the $1.4\times$ workspace variation---the closed loop is asymptotically stable and $x_e(k)\to0$ (no disturbance), provided recursive feasibility holds.
+\end{theorem}
+
+\begin{theorem}[ISS / offset-free]\label{thm:iss}
+If $\|d(t)\|\le\bar d$, the augmented system is observable, and the input-centered QP \eqref{eq:qp} is feasible, $(x_e,\hat d)$ is input-to-state stable with an error bound that scales with the unmodeled time variation of $d$. For constant matched disturbances in the nominal, free-space limit, $\hat d\to d_\infty$ implies $U_d=\mathbf{1}_N\Lambda_n d_\infty$ and $\Delta(d_\infty)+\Gamma U_d=0$, hence the unconstrained law becomes $F_{\text{mpc}}=\Lambda_n d_\infty+K_{\text{eff}}e+D_{\text{eff}}\dot e$ and the steady error is exactly zero. For slowly varying disturbances the residual error scales with $\|\dot d\|$. Under stiff contact the achievable steady-state error is additionally bounded by the force constraint and is therefore nonzero (Section~\ref{sec:compare} confirms a contact-limited residual).
+\end{theorem}
+
+\emph{Proof status.} Theorem~\ref{thm:equiv} is supported by the sketch above. Theorems~\ref{thm:nominal}--\ref{thm:iss} follow standard arguments---terminal-cost/recursive-feasibility stability for constrained MPC~\cite{rawlings2017} and the augmented-observer offset-free result~\cite{pannocchia2003}---specialized to the constant-$A_d$ scalar plant with the input-centering identity $\Delta(\hat d)+\Gamma U_d(\hat d)=0$.
+
+\begin{proposition}[LPV stability margin]\label{prop:lpv}
+For the scalar plant \eqref{eq:disc}, let $K=[k_1,k_2]$ be a gain designed at $\Lambda_{n,\text{ref}}$ (normalized to $\Lambda_{n,\text{ref}}=1$) and applied where the true inertia is $\Lambda_{n,\text{true}}$, giving the closed loop $A_{cl}(\rho)=A_d-\rho\,B_d(\Lambda_{n,\text{ref}})K$ with $\rho=\Lambda_{n,\text{ref}}/\Lambda_{n,\text{true}}$ (since $B_d\propto\Lambda_n^{-1}$). Then $A_{cl}(\rho)$ is Schur for all $\rho\in(0,\rho^\star)$ with
+\begin{align}
+\rho^\star
+&=\min\!\left\{\frac{2}{\Delta t\,|k_2|},\
+\frac{2}{\Delta t\,|k_2-\tfrac12\Delta t\,k_1|}\right\} \nonumber\\
+&=\frac{2}{\Delta t\,|k_2|},
+\label{eq:rhostar}
+\end{align}
+the first bound binding as a real pole exits through $z=-1$; the second corresponds to $\det=-1$. For the benchmark gain ($k_2=-294.9$, $\Delta t=2$\,ms) this gives $\rho^\star\approx3.39$, agreeing with the simulated spectral-radius sweep (Appendix~\ref{app:lpv}; \texttt{simulation/catheter\_verify.py}).
+\end{proposition}
+
+\begin{remark}[Workspace margin]\label{rmk:lpv}
+Over the workspace $\Lambda_n(\kappa)$ varies only $1.4\times$, i.e.\ $\rho\in[0.70,1.0]$, a margin of more than $3\times$ to $\rho^\star\approx3.4$ ($\Lambda_{n,\text{true}}>0.29\,\Lambda_{n,\text{ref}}$); under-estimates ($\Lambda_{n,\text{true}}>\Lambda_{n,\text{ref}}$, $\rho<1$) are always stable since $\rho^\star>1$. A single fixed gain is therefore robustly stable, and the $\Lambda_n(\kappa)$-normalized gain holds the closed-loop poles nearly configuration-invariant (spread ${\sim}2\times10^{-6}$, Section~\ref{sec:verify}). The nominal-limit caveat on Theorem~\ref{thm:iss} is essential: as the simulation shows (Section~\ref{sec:compare}; Appendix~\ref{app:forcereg}), offset-free tracking does \textbf{not} hold under stiff contact or fast cardiac motion.
+\end{remark}
+
+\section{Discussion}\label{sec:discussion}
+
+\subsection{Predictive Interaction Optimization and the $\dot d=0$ Model}\label{sec:ddot}
+
+The primary value of prediction here is \textbf{interaction-constraint enforcement} and \textbf{trajectory feedforward}, not contact-force forecasting: the feedforward $\ddot p_d$ and the known constraint bounds are exact, the Kalman disturbance estimate moderate, and force prediction near-useless (the tissue is unknown). A zero-order-hold $\hat d(k{+}i)=\hat d(k)$ is therefore adopted, and the offset-free guarantee holds at steady state regardless of prediction quality. This integrating model is a worst-case approximation for any slowly-varying disturbance; the ${\sim}1$\,Hz cardiac force could instead be predicted by (A)~raising the process-noise covariance for faster adaptation, or (B)~an ECG-gated periodic model $\hat d(k{+}1)=\hat d_{\text{DC}}(k)+A_{\text{card}}\sin(\omega_{\text{heart}}(k{+}1)\Delta t+\phi)$---left to future work. During first contact the estimate lags a few samples; the hard force constraint is the safety backstop in that transient.
+
+\subsection{Modeling and Sensing}
+
+\emph{Partial cancellation.} Catheter stiffness $K(\kappa)$ suffers hysteresis and specimen variability, so inverting an inaccurate $\hat K$ can \emph{increase} the disturbance; we cancel only reliably-estimated components and let the residual add to $d(t)$, including a feedforward term only if its omission would exceed the Kalman bandwidth. \emph{Sensing.} Tip position for the Kalman updates is available from EM tracking, fluoroscopy, intracardiac echocardiography, or FBG shape sensing (${\sim}0.5$\,mm); no force sensor is required, though an available FBG force estimate can be injected to reduce contact-transient lag.
+
+\subsection{Robustness to Contact-Normal Misalignment}
+
+The scalar $y$ is taken along an assumed contact normal; proximal deflections can rotate the true normal by $\theta$. The effective contact stiffness along the assumed axis scales as $k_t\cos^2\theta$ (a $7\%$ change at $15^\circ$), a slowly-varying mismatch $\hat d$ absorbs, while the off-axis ${\sim}F\sin\theta$ does not enter the regulated coordinate, leaving offset-free and ISS intact. For the safety bound the projection underestimates the true normal force by $1/\cos\theta$, so a misalignment-aware design tightens $F_{\text{safe}}$ by $\cos\theta_{\max}$. \emph{Tested on the MuJoCo benchmark:} the worst-case admissible true force $F_{\text{safe}}/\cos\theta$ grows to $0.577$\,N at $\theta=30^\circ$ (realized $0.54$\,N)---a $15\%$ breach---whereas the $\cos\theta_{\max}$-tightened bound ($\theta_{\max}=30^\circ$) holds it ${\le}0.50$\,N for all $\theta\le30^\circ$ (realized ${\le}0.46$\,N). Tracking under large, time-varying $\theta$ remains future work.
+
+\section{Interaction-Dynamics Simulation Results}\label{sec:sim}
+
+\subsection{Setup}
+
+We evaluate the controller on a \emph{distributed-compliance} plant in the MuJoCo physics engine: an eight-link pseudo-rigid-body (PRB) tendon-driven catheter (each joint a torsional spring approximating the segment flexural rigidity, total length 5\,cm), actuated through a routed spatial tendon (tension-only), pressing on a Kelvin--Voigt tissue wall ($k_t=5$\,kN/m, $b_t=40$\,N$\cdot$s/m, applied analytically on the tip so the stiff contact is faithful---MuJoCo's regularized soft contact cannot represent it). This plant genuinely violates the reduced-order assumptions: eight elastic DOFs, a configuration-dependent tendon transmission, and distributed bending the scalar model lumps away. The scalar operational-space inertia $\Lambda_n(\kappa)$ and tendon-to-tip-normal transmission $J_n(\kappa)$ are read from the model (mass matrix and tip Jacobian on the contact normal): $\Lambda_n\approx3.5\times10^{-3}$, $J_n\approx0.087$, catheter tip stiffness $k_{\text{eff}}\approx8.4$\,N/m. Two specializations carry the scalar design onto this plant: the impedance gains are $\Lambda_n$-scaled to the measured inertia (preserving $\omega\approx30$\,rad/s), and the corrective force $F_{\text{mpc}}$ is realized in \emph{tendon space}, $T=-(u_{\text{ff}}+F_{\text{mpc}})/J_n$ with Layer-1 feedforward $u_{\text{ff}}=k_{\text{eff}}y_d$, so the hard bound \eqref{eq:force_constraint} is the box $|F_{\text{mpc}}|\le F_{\text{safe}}$ on the corrective force (the elastic $k_{\text{eff}}e$ contribution to $\hat F_n$ is negligible on the compliant catheter). By Theorem~\ref{thm:equiv} the unconstrained controller is the static impedance feedback and the scalar force-magnitude QP reduces to the predicted-force clip used here; the offset-free disturbance is an integrating estimator on the tip error. Control rate 500\,Hz; tendon limit $\pm8$\,N; $F_{\text{safe}}=0.5$\,N. The reference approaches the surface (1\,s), presses to a target 1.5\,mm \emph{past} it ($\approx7.5$\,N if tracked rigidly---far beyond what an $8$\,N tendon delivers through $J_n$), holds 1\,s, and retracts, deliberately stressing the safety mechanism. Reproducible: \texttt{simulation/catheter\_benchmark\_mujoco.py}.
+
+\subsection{Controller Comparison}\label{sec:compare}
+
+\begin{table}[!t]
+\caption{Interaction-Dynamics Comparison Under Free Motion and Contact}
+\label{tab:compare}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{lcccc}
+\toprule
+Controller & \shortstack{Approach\\RMS (mm)} & \shortstack{Max\\$F$ (N)} & \shortstack{$F_{\text{safe}}$\\viol.?} & \shortstack{Hold err.\\(mm)} \\
+\midrule
+Classical impedance & 0.28 & 0.17 & No & 1.48 \\
+Predictive ID (no FC) & 0.03 & 0.60 & \textbf{Yes} & 1.41 \\
+\textbf{Predictive ID (with FC)} & \textbf{0.03} & \textbf{0.47} & \textbf{No} & 1.41 \\
+Joint-space PD & 1.82 & 0.00 & No & 3.76 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{catheter_results.png}
+\caption{Catheter tip tracking (top) and contact force (bottom) for the four controllers of Table~\ref{tab:compare} over the approach--press--hold--retract task, on the MuJoCo distributed-compliance plant. The shaded band marks the contact-hold window. The force-constrained predictive interaction-dynamics controller (green) tracks the reference and holds the contact force below the 0.5\,N safety bound (dashed); the unconstrained offset-free controller (blue) tracks identically but drives to 0.60\,N---over the bound---to eliminate position error against the penetrating target. Classical impedance (red) stays gentle (0.17\,N) but mistracks, and joint-space PD (gray), lacking the Layer-1 feedforward, cannot overcome the distributed elasticity to reach the tissue.}
+\label{fig:benchmark}
+\end{figure}
+
+Key results (Table~\ref{tab:compare}, Fig.~\ref{fig:benchmark}):
+\begin{itemize}
+\item \emph{Offset-free rejection of the model-reduction residual (free space).} The uncancelled higher-order bending dynamics and configuration-dependent $J_n$ act as a slowly-varying residual; classical impedance leaves a 0.28\,mm approach error against it, which the offset-free integrator drives to 0.03\,mm (\textbf{90\% reduction})---rejecting genuine model-reduction error, not a synthetic bias.
+\item \emph{Force safety is the decisive interaction constraint.} Only the force-constrained predictive interaction-dynamics controller achieves both accurate tracking (0.03\,mm) \emph{and} the 0.5\,N bound (peak 0.47\,N). Classical impedance (0.17\,N) and joint-space PD (no contact) stay under the bound only by being too soft to track the penetrating target---safety bought with accuracy, the trade the constraint removes.
+\item \emph{Offset-free motion regulation \textbf{without} a force limit overshoots the bound.} The unconstrained predictive controller, driving hard to eliminate position error against the penetrating target, pushes the contact force to 0.60\,N ($0.595$\,N precisely)---19\% over $F_{\text{safe}}$. This is far milder than the multi-newton overshoot a stiff lumped plant predicts (the compliant catheter and $8$\,N tendon cap the realizable force below $1$\,N), but the bound is \emph{still breached}: offset-free motion regulation and force safety remain in tension, resolved only by the hard interaction constraint (0.60\,$\to$\,0.47\,N at identical tracking).
+\item \emph{Hold error is contact-limited.} The tracking controllers retain ${\sim}1.41$\,mm hold error because the commanded depth needs ${>}7$\,N the tendon cannot deliver. Joint-space PD, lacking the Layer-1 feedforward, cannot even reach the tissue at a stably-rescaled gain (1.82\,mm approach, no contact)---evidence that the feedforward, not raw gain, overcomes the distributed elasticity. The simulation thus does \textbf{not} support a blanket ``zero steady-state error'' claim under stiff contact---offset-free holds in free space and in the nominal limit.
+\end{itemize}
+
+\subsection{Comparison with Published Catheter-Control Approaches}
+
+Table~\ref{tab:capability} positions the proposed predictive interaction-dynamics framework against representative classes of catheter/continuum-robot control from the literature. Direct numerical comparison is limited---reported conditions (platform, sensing, contact, metric) differ substantially---so the table compares \emph{capabilities} and order-of-magnitude characteristics rather than asserting head-to-head accuracy. The row for this work is from the MuJoCo simulation in Section~\ref{sec:compare}; the literature rows summarize the cited methods at a capability level rather than reproducing their experiments.
+
+\begin{table}[!t]
+\caption{Capability Comparison with Representative Catheter-Control Methods}
+\label{tab:capability}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{lcccccc}
+\toprule
+Method & Model & Rate & \shortstack{Hard\\$F$} & \shortstack{Offset-\\free} & \shortstack{Force\\sens.} & Stab. \\
+\midrule
+Class.\ imp.~\cite{hogan1985} & port imp. & kHz & No & No & opt. & passiv. \\
+Jacob.~\cite{camarillo2008,yip2014} & kinematic & 10--100\,Hz & No & No & local & partial \\
+Cosserat~\cite{rucker2011} & Cosserat & 10--20\,Hz & soft & varies & yes & NLP-dep. \\
+Learning & data & high & No & No & varies & none \\
+ADRC~\cite{han2009} & lumped-dist. & kHz & No & yes & yes & yes \\
+\textbf{This work} & int.-dyn.+Kal. & \textbf{500\,Hz} & \textbf{Yes} & \textbf{yes} & \textbf{no} & \shortstack{ISS+\\DARE} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\emph{Observations.} (1)~Among the surveyed classes, only the proposed framework provides a \emph{hard} contact-force interaction constraint with formal feasibility, the clinically essential capability (Section~\ref{sec:compare}). Here ``hard'' means a horizon-wise force bound enforced inside the optimization; input saturation on a non-predictive law (e.g.\ ADRC with a clamped command) limits the \emph{command}, not the predicted contact force, and cannot guarantee feasibility against a penetrating reference, so the ``No'' entries are in this stronger, predictive sense. (2)~It retains a high update rate (500\,Hz) because the configuration-invariant $A_d$ structure makes the unconstrained step a matrix--vector multiply, unlike Cosserat predictive control whose online NLP limits rates to ${\sim}10$--20\,Hz. (3)~It requires no force sensor, unlike ADRC formulations that key off a measured force channel. (4)~Its formal guarantees (ISS, DARE-based stability) exceed those of learning-based and purely kinematic controllers. The trade-off is reduced model fidelity relative to full Cosserat predictive control---mitigated by the disturbance-compression principle (Remark~\ref{rmk:compress}).
+
+\emph{Quantitative reading.} Table~\ref{tab:quant} places the present work against the closest published baselines---the sensor-free tendon-driven ablation-catheter force controllers of Jolaei \emph{et al.}~\cite{jolaei2020} and Kesner and Howe~\cite{kesner2014}.
+
+\begin{table}[!t]
+\caption{Quantitative Comparison with Reported Sensor-Free / Force-Controlled Catheter Results}
+\label{tab:quant}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lcccc}
+\toprule
+Work & Objective & Sensing & Force result & \shortstack{Hard\\bound} \\
+\midrule
+\cite{jolaei2020} & force reg. & sensor-free & 0.03--0.05\,N RMSE & no \\
+\cite{kesner2014} & force reg. & sensor+US & ${\sim}0.08$\,N RMSE & no \\
+\shortstack[l]{\textbf{This work}\\(safety)} & \shortstack[c]{pos.\ track\\+ $F$ safety} & sensor-free & \shortstack[c]{peak \textbf{0.47}\,N\\($\le0.5$)} & \textbf{yes} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A direct head-to-head is \emph{not} meaningful: \cite{jolaei2020,kesner2014} \textbf{regulate} contact force to a setpoint (30--80\,mN, \emph{hardware} results), whereas this work tracks a position trajectory while \textbf{bounding} the contact force as a hard constraint---so the comparison is by capability, not by the force-error column. The same formulation \emph{can} also regulate force, but we make \textbf{no} claim of regulation parity: with the offset-free position drive propagated through the horizon the two objectives compete, and 1\,Hz cardiac motion degrades regulation further (characterized in Appendix~\ref{app:forcereg}, motivating the cardiac-phase-aware periodic model of Section~\ref{sec:ddot}). The distinct contribution is the unification of offset-free position tracking with a hard predicted-force bound and feasibility guarantees in one constrained optimization---which setpoint force regulation does not provide.
+
+\subsection{Disturbance Estimation}
+
+The Kalman filter converges within a few sample periods; during the contact-onset transient the estimate lags, but the tendon-force cap prevents bound violation before convergence---the constraint, not the estimate, provides the safety guarantee. The disturbance estimate improves \emph{tracking}; the hard constraint provides \emph{safety}.
+
+\subsection{Safety Under Cardiac Wall Motion}\label{sec:cardiac}
+
+The headline result (Table~\ref{tab:compare}) is a position-tracking task with a hard force bound; its dependence on cardiac motion is fundamentally different from the force-regulation mode of Appendix~\ref{app:forcereg}, and far more benign. We test it directly by re-running the force-constrained predictive interaction-dynamics controller with a beating wall (Table~\ref{tab:cardiac}, Fig.~\ref{fig:cardiac}). The bound is respected across \emph{all} tested conditions---static, $0.3$\,mm at $1$\,Hz, and $0.5$\,mm at $1.2$\,Hz with measurement noise (peak $\approx0.47$\,N throughout, no violation)---for an instructive physical reason: the catheter tip compliance ($k_{\text{eff}}\approx8$\,N/m) is ${\sim}600\times$ softer than the tissue ($k_t=5$\,kN/m), so the distributed catheter \emph{rides with} the moving wall and the contact-force variation from even a $0.5$\,mm wall excursion is small (peak essentially unchanged from static). The hard constraint continues to cap the \emph{controller-induced} force regardless of the $\dot d=0$ model, and the contact-onset impact transients $b_t(\dot y-\dot y_{\text{wall}})$ remain under the bound because the compliant tip closes on the wall gently. The compliant continuum is thus inherently more forgiving of cardiac motion than a stiff lumped model suggests: the safety guarantee on controller-induced force is robust to cardiac motion, and the residual environment-induced force is buffered by catheter compliance rather than entering the impact-transient regime. Tight force \emph{regulation} (Appendix~\ref{app:forcereg}) is the part that additionally requires predicting the motion.
+
+\begin{table}[!t]
+\caption{Safety Mode (Predictive ID\,+\,Force Constraint) Under Cardiac Wall Motion}
+\label{tab:cardiac}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lccc}
+\toprule
+Wall condition & \shortstack{Approach\\RMS (mm)} & \shortstack{Peak\\$F$ (N)} & \shortstack{$F_{\text{safe}}$\\viol.?} \\
+\midrule
+Static (Table~\ref{tab:compare} baseline) & 0.03 & 0.47 & No \\
+$0.3$\,mm @ $1$\,Hz & 0.03 & 0.47 & No \\
+$0.5$\,mm @ $1.2$\,Hz $+$ noise & 0.06 & 0.47 & No \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{catheter_cardiac.png}
+\caption{Contact force for the force-constrained predictive interaction-dynamics controller (position-tracking safety mode) under a beating tissue wall (Table~\ref{tab:cardiac}), 
+on the MuJoCo plant. All three conditions---static (green), $0.3$\,mm/$1$\,Hz (blue), and $0.5$\,mm/$1.2$\,Hz with noise (red)---stay below the $0.5$\,N 
+bound (dashed) with peak $\approx0.47$\,N, because the compliant catheter ($k_{\text{eff}}\approx8$\,N/m) rides with the moving wall and the contact-onset 
+impact spikes $b_t(\dot y-\dot y_{\text{wall}})$ remain bounded. The hard constraint caps the controller-induced force throughout.}
+\label{fig:cardiac}
+\end{figure}
+
+\subsection{Verification of Structural Claims}\label{sec:verify}
+
+Four further checks---structural properties of the discrete-time controller and contact law, plus an approach-velocity qualification on the current 
+MuJoCo plant---complete the picture (\texttt{simulation/catheter\_verify.py}):
+
+\emph{(1) Configuration-adaptive compliance.} Computing $\Lambda_n(\kappa)$ from the scalar normal Jacobian \eqref{eq:JnLambda} over $\kappa\in[2,25]\,\text{m}^{-1}$ (a $1.4\times$ inertia variation), the $\Lambda_n(\kappa)$-normalized controller holds the closed-loop pole spread to ${\sim}2\times10^{-6}$---roughly $80\times$ tighter than a fixed-$\Lambda_n$ gain's ${\sim}1.5\times10^{-4}$ drift (which grows with control authority); Fig.~\ref{fig:poles} plots both pole loci. The normalization is a closed-form gain scaling by $\Lambda_n(\kappa)$---equivalent for this plant to a per-configuration LQR redesign, since the optimal gain scales with $\Lambda_n$---and it is this $\Lambda_n$-awareness, absent from a single fixed gain, that renders the tip compliance configuration-independent. The magnitude of the fixed-gain drift is modest for a single segment's $1.4\times$ range but grows for the larger inertia variation of multi-segment catheters (Section~\ref{sec:conclusion}).
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{catheter_lambda_poles.png}
+\caption{Dominant closed-loop pole magnitude versus curvature $\kappa$ (left) and pole drift relative to $\kappa=2\,\text{m}^{-1}$ (right). The $\Lambda_n(\kappa)$-normalized gain (green) holds the pole spread to ${\sim}2\times10^{-6}$ across the $1.4\times$ inertia variation, ${\sim}80\times$ tighter than the fixed-$\Lambda_n$ gain (red)---confirming that the scalar operational-space inertia normalization (a closed-form gain scaling, equivalent here to per-configuration redesign) is what makes the tip compliance configuration-invariant.}
+\label{fig:poles}
+\end{figure}
+
+\emph{(2) Hard constraint via the QP.} For a 3\,mm error the unconstrained step demands $|F_{\text{mpc}}| = 1.99$\,N; solving the condensed QP with 
+OSQP under a 0.5\,N limit returns $|F_{\text{mpc}}| = 0.50$\,N (constraint respected), and reproduces the closed-form solution to $10^{-3}$ when the 
+constraint is inactive. This verifies that the actuator/safety limits are genuinely enforced by the QP, with the closed-form step of~\eqref{eq:qp} 
+recovered when no constraint binds.
+
+\emph{(3) Real-time feasibility.} The unconstrained closed-form step runs in ${\approx}0.9\,\mu$s and the warm-started OSQP solve in ${\approx}28\,\mu$s 
+per step on a desktop CPU---both far inside the 2\,ms (500\,Hz) budget, supporting the real-time claim with margin for embedded hardware. (Embedded-target 
+timing remains future work.)
+
+\emph{(4) Approach-velocity safety qualification.} A constant-velocity approach sweep with the force-constrained controller on the current MuJoCo compliant 
+plant remains below $F_{\text{safe}}$ across the tested approach speeds; the compliant catheter rides with the wall and the QP caps the controller-induced 
+component. The qualification is nevertheless important for the safety claim: \textbf{the hard constraint bounds \emph{controller-induced} force, 
+but a fast impact can inject an \emph{environment-induced} $b_t\dot y$ transient that no input limit can prevent within one sample.} The damping-only 
+bound $v < F_{\text{safe}}/b_t = 12.5$\,mm/s is therefore a planning-scale guide, not a controller certificate. Safe operation still requires 
+velocity-limited approach or contact-onset detection with reference ramping; the cardiac tests in Section~\ref{sec:cardiac} show that the present 
+compliant MuJoCo plant stays below the bound under the tested wall motions.
+
+\subsection{Robustness to Unmodeled Tendon Hysteresis}\label{sec:mujoco}
+
+The offset-free integrator above rejects the slowly-varying model-reduction residual; we separately stress it with an \emph{unmodeled} Coulomb 
+tendon-sheath friction added to the MuJoCo plant (sign-dependent hysteresis, $0.3$\,N), with the controller still tuned on the nominal frictionless 
+model. On a free-space sinusoidal tracking task, the offset-free state cuts the tracking RMS from $0.27$\,mm to $0.011$\,mm with \emph{no} friction 
+(a 96\% reduction, consistent with the headline benchmark), but with the $0.3$\,N Coulomb friction it cuts it only from $0.81$\,mm to $0.47$\,mm: 
+the constant-bias internal model trivially absorbs the DC offset, but the integrating estimate lags each motion reversal, leaving a residual 
+hysteresis error the $\dot d=0$ model cannot cancel. This is the genuine cost the scalar constant-$F_{\text{fric}}$ assumption hid, and---together 
+with the configuration dependence of $J_n(\kappa)$---it motivates a hysteresis-aware disturbance model (Section~\ref{sec:conclusion}, future work 
+(vi)) that augments the integrating state to capture the sign-dependent component. The qualitative safety conclusion is unaffected: the hard 
+constraint, not the estimate, bounds the contact force.
+
+\section{Conclusion}\label{sec:conclusion}
+
+Rather than viewing steerable catheter control as an impedance-control problem, this work formulates it as an interaction-dynamics regulation problem. The catheter--tissue interaction is first reduced to the correct scalar tip-normal state, then normalized into configuration-invariant linear dynamics, and finally regulated by predictive optimization with disturbance augmentation and hard interaction constraints. Classical impedance appears as the unconstrained, disturbance-free special case; the clinically relevant controller departs from it when offset-free motion regulation, tendon limits, curvature limits, and contact-force safety compete.
+
+A MuJoCo distributed-compliance simulation of an eight-link tendon-driven catheter shows that disturbance augmentation cuts free-space approach error by 90\%, but the decisive result is interaction safety: only the force-constrained predictive interaction-dynamics controller delivers both accurate tracking and the 0.5\,N contact-force bound (peak 0.47\,N), whereas the unconstrained offset-free controller drives to 0.60\,N. We characterized this honestly: on the realistic compliant plant the unconstrained overshoot is milder than a stiff lumped model predicts, but offset-free motion regulation and contact-force safety remain in tension under stiff contact, and the hard interaction constraint is what resolves it. The resulting framework provides a unified foundation for compliant catheter motion, constraint handling, and safety-critical tissue interaction, and is extensible to multi-segment catheters, surgical robotics, rehabilitation, whole-body control, and dexterous manipulation.
+
+Our future work includes: (i)~hardware validation on a tendon-actuated catheter with EM tracking; 
+(ii)~FBG-based force estimation as a direct disturbance channel; 
+(iii)~cardiac-phase-aware periodic disturbance models; 
+(iv)~extension to multi-segment catheters with $m$ independent tendons (an $m$-DOF version with configuration-varying operational-space inertia); 
+(v)~energy-budget augmentation toward certified passivity during aggressive contact; 
+and (vi)~a hysteresis-aware disturbance model that augments the integrating state to capture the sign-dependent (Coulomb) component of 
+tendon-sheath friction, which the constant-bias model rejects only partially (Section~\ref{sec:mujoco}).
+
+\appendices
+
+\section{Force-Regulation Mode and Its Cardiac-Motion Limit}\label{app:forcereg}
+
+The safety contribution of this paper \emph{bounds} the predicted controller-induced contact force; the setpoint controllers 
+of~\cite{jolaei2020,kesner2014} \emph{regulate} contact force. To compare like-for-like we add a force-regulation mode to the 
+same controller on the MuJoCo plant: during free-space approach it tracks position as before, and during contact it regulates 
+a sensor-free contact-force estimate (the commanded tip force beyond the modeled elasticity, $\hat F_c = J_n|T| - k_{\text{eff}}|y|$) 
+to a clinical target of $0.2$\,N via an integral law on the tendon command, while the hard predicted-force bound \eqref{eq:force_constraint} 
+remains active. This mode is \emph{not} a claimed contribution---the hardware results of~\cite{jolaei2020,kesner2014} (30--80\,mN) are 
+better---but it characterizes what the framework does and does not provide. Two conditions are run over the contact-hold window:
+\begin{itemize}
+\item \emph{Idealized (slowly varying disturbance):} force RMSE \textbf{${\sim}140$\,mN} about the 0.2\,N target. With the offset-free 
+position drive propagated through the horizon, the position-tracking and force-regulation objectives compete (the controller simultaneously 
+tries to reach the penetrating position target and hold 0.2\,N), so the simple integral law no longer regulates tightly; recovering low 
+force RMSE requires re-tuning the force-regulation gain or an explicit position/force task hierarchy (future work). The hard predicted-force 
+bound is unaffected.
+\item \emph{Realistic (1\,Hz cardiac wall motion, 0.3\,mm amplitude, plus 0.2\,mm position noise):} force RMSE is \textbf{${\sim}170$\,mN}. 
+The zero-order-hold $\dot d = 0$ model cannot anticipate the periodic motion (Section~\ref{sec:ddot}), so the estimate lags. This is \emph{worse} 
+than the reported hardware controllers and identifies the cardiac-phase-aware periodic disturbance model (Section~\ref{sec:ddot}, Option~B) 
+as \textbf{essential} future work for force-regulation use---not merely an enhancement.
+\end{itemize}
+
+In both force-regulation conditions the \emph{peak} measured force stays under $F_{\text{safe}}$ (${\sim}0.35$\,N idealized, ${\sim}0.43$\,N 
+with cardiac motion): unlike the stiff reduced model---where the integral force law drove the command toward the cap and an environment-induced 
+$b_t\dot y$ impact transient pushed the peak past $F_{\text{safe}}$---the compliant catheter closes on the wall gently, so the regulation error 
+shows up as a poorly-\emph{regulated} (not unsafe) force. The hard predicted-force bound caps the \emph{controller-induced} command throughout, 
+and the position-tracking \emph{safety} mode holds the bound even more comfortably under the same cardiac motion (Section~\ref{sec:cardiac}, 
+Table~\ref{tab:cardiac}).
+
+\section{Derivation of the LPV Stability Margin $\rho^\star$}\label{app:lpv}
+
+This appendix proves Proposition~\ref{prop:lpv} in closed form, replacing the ``computing the spectral radius'' assertion with an explicit Jury 
+analysis. After the exact ZOH discretization \eqref{eq:disc} the scalar error plant has the \emph{constant}
+\begin{equation*}
+A_d=\begin{bmatrix}1&\Delta t\\0&1\end{bmatrix},\qquad
+B_d(\Lambda_n)=-\frac1{\Lambda_n}\,b,\quad b=\begin{bmatrix}\tfrac12\Delta t^2\\[1pt]\Delta t\end{bmatrix}.
+\end{equation*}
+A gain $K=[k_1,k_2]$ synthesized at $\Lambda_{n,\text{ref}}=1$ but acting where the true inertia is $\Lambda_{n,\text{true}}$ gives, 
+using $B_d(\Lambda_{n,\text{true}})=(\Lambda_{n,\text{ref}}/\Lambda_{n,\text{true}})\,B_d(\Lambda_{n,\text{ref}})=\rho\,B_d(\Lambda_{n,\text{ref}})$ 
+with $\rho=\Lambda_{n,\text{ref}}/\Lambda_{n,\text{true}}$,
+\begin{align}
+A_{cl}(\rho)
+&=A_d-\rho\,B_d(1)\,K=A_d+\rho\,bK \nonumber\\
+&=\begin{bmatrix}
+1+\tfrac12\rho\Delta t^2k_1 &
+\Delta t+\tfrac12\rho\Delta t^2k_2\\[2pt]
+\rho\Delta t\,k_1 &
+1+\rho\Delta t\,k_2
+\end{bmatrix}.
+\label{eq:Aclrho}
+\end{align}
+Its characteristic polynomial is $\chi(z)=z^2-\operatorname{tr}(\rho)\,z+\det(\rho)$ with
+\begin{align}
+\operatorname{tr}(\rho)&=2+\rho\Delta t\big(k_2+\tfrac12\Delta t\,k_1\big),\label{eq:tr}\\
+\det(\rho)&=1+\rho\Delta t\big(k_2-\tfrac12\Delta t\,k_1\big).\label{eq:det}
+\end{align}
+(The $\rho^2$ terms in $\det$ cancel because $A_d$ is unipotent and $bK$ is rank one---the same constant-$A_d$ structure exploited throughout.) 
+By Jury's criterion a monic second-order $\chi$ is Schur iff
+\begin{align}
+|\det(\rho)|&<1, \nonumber\\
+\chi(1)&=1-\operatorname{tr}+\det>0, \nonumber\\
+\chi(-1)&=1+\operatorname{tr}+\det>0.
+\label{eq:jury}
+\end{align}
+Substituting \eqref{eq:tr}--\eqref{eq:det} into the three crossings:
+\begin{itemize}
+\item \emph{$z=+1$:} $\chi(1)=-\rho\Delta t^2 k_1>0$ for all $\rho>0$ (since $k_1<0$)---never binds.
+\item \emph{$z=-1$:} $\chi(-1)=4+2\rho\Delta t\,k_2$, which vanishes at $\rho=-2/(\Delta t\,k_2)=2/(\Delta t\,|k_2|)$ (a real pole reaching $-1$).
+\item \emph{$|\det|=1$:} $\det(\rho)<1$ holds for all $\rho>0$ (as $k_2-\tfrac12\Delta t\,k_1<0$), and $\det(\rho)=-1$ at $\rho=2/\big(\Delta t\,|k_2-\tfrac12\Delta t\,k_1|\big)$.
+\end{itemize}
+The stability boundary is the smallest positive crossing, giving \eqref{eq:rhostar}. For the benchmark gains $k_1=-2.04\times10^3$, $k_2=-294.9$ and $\Delta t=2$\,ms,
+\begin{equation*}
+\frac{2}{\Delta t\,|k_2|}=3.39,\qquad \frac{2}{\Delta t\,|k_2-\tfrac12\Delta t\,k_1|}=3.42,
+\end{equation*}
+so $\rho^\star=3.39$ (the $z=-1$ flip binds), exactly the value returned by the brute-force spectral-radius sweep over $\rho\in[1,40]$ in \texttt{catheter\_verify.py} ($\rho_{\max}=3.39$). The margin is governed by the velocity gain $k_2$ and the step $\Delta t$ alone; with the workspace $\rho\in[0.70,1.0]$ the loop is robustly stable with $>3\times$ margin (Remark~\ref{rmk:lpv}).
+
+\begin{thebibliography}{15}
+
+\bibitem{hogan1985}
+N.~Hogan, ``Impedance control: An approach to manipulation, Parts I--III,'' \emph{ASME J. Dyn. Syst. Meas. Control}, vol.~107, no.~1, pp.~1--24, Mar.\ 1985.
+
+\bibitem{webster2010}
+R.~J. Webster~III and B.~A. Jones, ``Design and kinematic modeling of constant curvature continuum robots: A review,'' \emph{Int. J. Robot. Res.}, vol.~29, no.~13, pp.~1661--1683, 2010.
+
+\bibitem{antman1995}
+S.~S. Antman, \emph{Nonlinear Problems of Elasticity}, 2nd~ed. New York: Springer, 1995.
+
+\bibitem{rucker2011}
+D.~C. Rucker and R.~J. Webster~III, ``Statics and dynamics of continuum robots with general tendon routing and external loading,'' \emph{IEEE Trans. Robot.}, vol.~27, no.~6, pp.~1033--1044, 2011.
+
+\bibitem{camarillo2008}
+D.~B. Camarillo, C.~F. Milne, C.~R. Carlson, M.~R. Zinn, and J.~K. Salisbury, ``Mechanics modeling of tendon-driven continuum manipulators,'' \emph{IEEE Trans. Robot.}, vol.~24, no.~6, pp.~1262--1273, 2008.
+
+\bibitem{yip2014}
+M.~C. Yip and D.~B. Camarillo, ``Model-less feedback control of continuum manipulators in constrained environments,'' \emph{IEEE Trans. Robot.}, vol.~30, no.~4, pp.~880--889, 2014.
+
+\bibitem{rawlings2017}
+J.~B. Rawlings, D.~Q. Mayne, and M.~Diehl, \emph{Model Predictive Control: Theory, Computation, and Design}, 2nd~ed. Madison, WI: Nob Hill, 2017.
+
+\bibitem{han2009}
+J.~Han, ``From PID to active disturbance rejection control,'' \emph{IEEE Trans. Ind. Electron.}, vol.~56, no.~3, pp.~900--906, 2009.
+
+\bibitem{pannocchia2003}
+G.~Pannocchia and J.~B. Rawlings, ``Disturbance models for offset-free model-predictive control,'' \emph{AIChE J.}, vol.~49, no.~2, pp.~426--437, Feb.\ 2003.
+
+\bibitem{maeder2009}
+U.~Maeder, F.~Borrelli, and M.~Morari, ``Linear offset-free model predictive control,'' \emph{Automatica}, vol.~45, no.~10, pp.~2214--2222, 2009.
+
+\bibitem{cao2005minmax}
+Y.-Y. Cao and Z.~Lin, ``Min--max MPC algorithm for LPV systems subject to input saturation,'' \emph{IEE Proc. Control Theory Appl.}, vol.~152, no.~3, pp.~266--272, 2005.
+
+\bibitem{yokoyama2008}
+H.~Yokoyama, H.~Nakagawa, J.~Kautzner \emph{et al.}, ``Novel contact force sensor incorporated in irrigated radiofrequency ablation catheter predicts lesion size and incidence of steam pop and thrombus,'' \emph{Circ. Arrhythm. Electrophysiol.}, vol.~1, no.~5, pp.~354--362, 2008.
+
+\bibitem{cao2026phri}
+Y.~Cao and J.~Tang, ``Impedance MPC for physical human--robot interaction: Predictive disturbance rejection with joint-limit safety,'' arXiv:2606.08281, Jun.\ 2026.
+
+\bibitem{jolaei2020}
+M.~Jolaei, A.~Hooshiar, A.~Sayadi, J.~Dargahi, and M.~Packirisamy, ``Sensor-free force control of tendon-driven ablation catheters through position control and contact modeling,'' in \emph{Proc. 42nd Annu. Int. Conf. IEEE Eng. Med. Biol. Soc. (EMBC)}, 2020, pp.~5248--5251.
+
+\bibitem{kesner2014}
+S.~B. Kesner and R.~D. Howe, ``Robotic catheter cardiac ablation combining ultrasound guidance and force control,'' \emph{Int. J. Robot. Res.}, vol.~33, no.~4, pp.~631--644, 2014.
+
+\bibitem{osqp}
+B.~Stellato, G.~Banjac, P.~Goulart, A.~Bemporad, and S.~Boyd, ``OSQP: An operator splitting solver for quadratic programs,'' \emph{Math. Program. Comput.}, vol.~12, no.~4, pp.~637--672, 2020.
+
+\end{thebibliography}

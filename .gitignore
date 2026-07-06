@@ -1,0 +1,24 @@
+# LaTeX build artifacts
+*.aux
+*.log
+*.fls
+*.fdb_latexmk
+*.out
+*.bbl
+*.blg
+*.synctex.gz
+
+# Generated PDFs (canonical source is the .tex / .md)
+*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Large binaries / logs
+*.mp4
+*.zip
+MUJOCO_LOG.TXT
+
+# OS
+.DS_Store
