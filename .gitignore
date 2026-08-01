@@ -8,9 +8,6 @@
 *.blg
 *.synctex.gz
 
-# Generated PDFs (canonical source is the .tex / .md)
-*.pdf
-
 # Python
 __pycache__/
 *.py[cod]
