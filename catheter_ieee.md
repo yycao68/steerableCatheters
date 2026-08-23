@@ -2,7 +2,7 @@
 
 **Yongyan Cao and Jinshan Tang**
 
-*Voryx Robotic LLC, San Jose, CA 95136, USA — yongyancao@gmail.com*
+*Voryx Robotics LLC, San Jose, CA 95136, USA — yongyancao@gmail.com*
 
 
 ---
