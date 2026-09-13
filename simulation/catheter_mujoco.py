@@ -143,9 +143,9 @@ def operational_inertia(model, data):
     Jz = jacp[2, :]                      # tip z-velocity wrt qvel
     M = np.zeros((model.nv, model.nv))
     try:
-        mujoco.mj_fullM(model, M, data.qM)          # pre-3.10 signature
-    except TypeError:
         mujoco.mj_fullM(model, data, M)             # MuJoCo >= 3.10: (m, d, dst)
+    except TypeError:
+        mujoco.mj_fullM(model, M, data.qM)          # pre-3.10 signature
     Minv = np.linalg.inv(M)
     lam_inv = Jz @ Minv @ Jz
     return 1.0 / lam_inv if lam_inv > 1e-12 else np.inf

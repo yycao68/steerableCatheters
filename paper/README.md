@@ -1,7 +1,37 @@
-# IEEE Submission — Interaction Dynamics Modeling and Predictive Control for Safe Steerable Catheter-Tissue Interaction
+# IEEE Submission — Interaction Dynamics Modeling and Force-Limited Control for Steerable Catheter-Tissue Interaction
 
 IEEE two-column rewrite of `../catheter_ieee.md` (2026-06-12), following
 the same two-wrapper pattern as `laparoscopy/paper/` and `dexterous_hand/paper/`.
+
+## Claim-alignment audit -- 2026-09-11
+
+- The maintained paper now separates the derived finite-horizon QP and Kalman
+   estimator from the executable MuJoCo benchmark. The benchmark evaluates static
+   impedance feedback with integral residual compensation, tendon saturation, and
+   pointwise corrective-force limiting.
+- The 0.5 N limit is described as a corrective-force proxy and engineering
+   threshold. Measured Kelvin--Voigt tissue force is reported separately, including
+   the observed approach-speed boundary between 12 and 15 mm/s.
+- Unsupported constrained-ISS and recursive-feasibility claims were removed; the
+   retained analysis covers the unconstrained DARE equilibrium and fixed-gain LPV
+   margin.
+- Controller names and the two benchmark figures were regenerated to match the
+   implementation. The review record is in `../catheter_ieee_review.md`.
+- Reproduce with the Python packages pinned in `../requirements.txt`:
+
+   ```text
+   python simulation/catheter_verify.py
+   python simulation/catheter_benchmark_mujoco.py
+   ```
+
+Both wrappers have since been rebuilt (pdflatex x3 + bibtex): 8 pages each, no
+errors and no undefined refs/citations. `catheter_mujoco.py`'s
+`operational_inertia` also had a live regression at rebuild time (a `hasattr(data,
+"qM")` check that stays true on MuJoCo >= 3.10 even though the attribute's
+role changed, so it picked the wrong, now-incompatible call signature and
+crashed `catheter_benchmark_mujoco.py` before it could produce anything);
+fixed by reverting to a try-the-new-signature-first/except-fall-back-to-the-
+old-one pattern, verified against a fresh rerun.
 
 ## Files
 
@@ -19,8 +49,8 @@ the same two-wrapper pattern as `laparoscopy/paper/` and `dexterous_hand/paper/`
   `../../simulation/catheter_verify.py` (analytical pole/QP/timing checks).
   A rendered MuJoCo benchmark animation is at `../../simulation/catheter_benchmark.mp4`.
 
-Both wrappers compile clean (no undefined refs/citations); the current IEEE wrapper
-is 9 pages (the force-regulation mode is in Appendix A — see decision 6).
+Both wrappers compile clean (no undefined refs/citations); after the
+2026-09-11 revision the IEEE wrapper is 8 pages (previously 9).
 
 ## Key editorial decisions vs. the markdown draft
 
@@ -32,12 +62,12 @@ is 9 pages (the force-regulation mode is in Appendix A — see decision 6).
    to a numbered Table I; the four-controller comparison becomes Table II, capability
    comparison Table III, quantitative comparison Table IV, and the safety-mode-under-
    cardiac-motion test Table V (booktabs throughout).
-3. **Measured-only claims preserved.** The honest characterization of the md is kept
-   verbatim in substance: offset-free helps mainly in free space, the hard constraint
-   is the decisive contribution, force-regulation mode regulates only to ~130 mN
-   (idealized) / ~190 mN (cardiac) and is explicitly *not* claimed at parity with the
-   hardware controllers [14], [15]. No projected/unverified numbers are presented as
-   measured. The position-tracking *safety* mode is separately shown to hold the
+3. **Measured-only claims preserved.** The evidence boundaries of the md are kept
+   in substance: integral compensation is characterized in free space, the
+   corrective-force limit is evaluated separately, and force-regulation mode gives
+   141.9 mN (static) / 166.6 mN (cardiac) RMSE. The hardware results in [14], [15]
+   are presented as different-platform context. Projected quantities are separated from
+   measured results. The force-limited position-tracking mode is separately shown to hold the
    0.5 N bound under moderate (0.3 mm/1 Hz) cardiac motion and to breach it only at
    the contact-onset impact transient for a fast/large (0.5 mm/1.2 Hz) wall — the same
    environment-induced effect as the approach-velocity limit (Table V, Fig. 3).
@@ -47,11 +77,10 @@ is 9 pages (the force-regulation mode is in Appendix A — see decision 6).
 5. Double-anonymous: base paper [13] (Cao & Tang) cited in third person throughout;
    author block "Anonymous Author(s)" in `catheter_ieee.tex`.
 6. **Force-regulation mode moved to Appendix A.** The setpoint force-regulation
-   comparison (~130 mN ideal / ~190 mN cardiac vs [14], [15] hardware) is a
-   characterization, *not* a contribution, and was relocated out of §VI so a reviewer
-   evaluates the headline hard-constraint safety result — which survives cardiac
-   motion (Table V) — rather than mistaking a secondary-mode weakness for a failure of
-   the main result. §VI keeps only the safety-under-cardiac test (Table V, Fig. 3);
+   comparison (141.9 mN static / 166.6 mN cardiac vs [14], [15] hardware) is a
+   supplementary characterization and was relocated out of §VI so the main
+   force-limited position-tracking result remains distinct from setpoint force
+   regulation. §VI keeps the force-limited cardiac-motion test (Table V, Fig. 3);
    Table IV drops the force-reg row; the "Honest reading" paragraph points to App. A.
 7. **All simulation is now MuJoCo-based (full port, 2026-06-22).** §VI is run entirely on
    the distributed-compliance MuJoCo plant (8-link PRB tendon-driven catheter, analytic

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Impedance-MPC catheter benchmark — MuJoCo distributed-compliance plant
-======================================================================
+Force-limited impedance benchmark — MuJoCo distributed-compliance plant
+========================================================================
 Full physics-engine version of the four-controller benchmark (replaces the RK4
 scalar plant of `catheter_benchmark.py`). All reported simulation results in the
 paper are produced here, on the tendon-driven eight-link pseudo-rigid-body (PRB)
 catheter of `catheter_mujoco.py`, with the analytic Kelvin--Voigt tissue wall.
 
-Controllers (all mapped to TENDON tension through the measured transmission J_k):
-  - Classical impedance      F = Kd e + Dd e_dot                  (no offset-free, no FC)
-  - Impedance MPC (no FC)     F = Kd e + Dd e_dot + d_hat          (offset-free, no bound)
-  - Impedance MPC (with FC)   same, with hard |F| <= F_safe        (the safety contribution)
-  - Joint-space PD            F = Kp e + Kd e_dot, NO feedforward   (fights catheter elasticity)
+Controllers (all mapped to tendon tension through the measured transmission J_k):
+    - Classical impedance       F = Kd e + Dd e_dot
+    - Impedance + integral      F = Kd e + Dd e_dot + d_hat
+    - Force-limited imp.+int.   same, with pointwise |F| <= F_safe
+    - Joint-space PD            F = Kp e + Kd e_dot, no feedforward
 
 Impedance-family gains are Lambda-rescaled to the measured tip inertia (preserving
 omega ~ 30 rad/s); the tendon command is T = -(u_ff + F)/J_k with u_ff = k_eff*y_ref
@@ -47,14 +47,14 @@ class Classical:
         return float(np.clip(-(ff + F)/s.Jk, -TENDON_MAX, 0.0))
 
 
-class ImpedanceMPC:
-    """Impedance MPC: impedance gains + offset-free integral disturbance state.
-    force_con=True adds the hard predicted-force bound |F| <= f_cap (default F_safe;
+class ImpedanceIntegral:
+    """Impedance gains with an integral residual state.
+    force_con=True adds the pointwise corrective-force limit |F| <= f_cap (default F_safe;
     set f_cap = F_safe*cos(theta_max) for the misalignment-tightened bound of Sec. V-E)."""
     def __init__(s, lam, J_k, k_eff, force_con, f_cap=F_SAFE):
         s.Kd, s.Dd, s.Ki = 900.0*lam, 60.0*lam, 300.0
         s.Jk, s.keff, s.fc, s.fcap = J_k, k_eff, force_con, f_cap
-        s.name = "Impedance MPC (with FC)" if force_con else "Impedance MPC (no FC)"
+        s.name = "Force-limited imp.+int." if force_con else "Impedance + integral"
         s.reset()
     def reset(s): s.dhat = 0.0
     def __call__(s, t, y, yd):
@@ -62,12 +62,12 @@ class ImpedanceMPC:
         s.dhat += s.Ki*e*DT_CTRL
         F = s.Kd*e + s.Dd*de + s.dhat
         if s.fc:
-            F = float(np.clip(F, -s.fcap, s.fcap))        # hard contact-force bound
+            F = float(np.clip(F, -s.fcap, s.fcap))        # pointwise corrective-force limit
         ff = s.keff*yr
         return float(np.clip(-(ff + F)/s.Jk, -TENDON_MAX, 0.0))
 
 
-class ForceReg(ImpedanceMPC):
+class ForceReg(ImpedanceIntegral):
     """Force-regulation mode (App. A): position-track in free space, then regulate the
     sensor-free contact-force estimate to F_des during the contact hold, hard bound still
     active. Sensor-free estimate Fc_hat = max(0, J_k*|T| - k_eff*|y|) = commanded tip force
@@ -144,15 +144,15 @@ def main():
     lam, J_k, k_eff = measure_plant(model, data)
 
     print("="*72)
-    print("Impedance-MPC catheter benchmark — MuJoCo PRB plant (d_tend=2.5 mm)")
+    print("Force-limited impedance benchmark — MuJoCo PRB plant (d_tend=2.5 mm)")
     print(f"  measured Lambda={lam:.3e}  J_k={J_k:.3f}  k_eff={k_eff:.1f} N/m  "
           f"F_safe={F_SAFE} N  ctrl=500 Hz")
     print(f"  Lambda-rescaled gains Kd={900*lam:.2f} Dd={60*lam:.3f}; FF cancels k_eff")
     print("="*72)
 
     ctrls = [Classical(lam, J_k, k_eff),
-             ImpedanceMPC(lam, J_k, k_eff, force_con=False),
-             ImpedanceMPC(lam, J_k, k_eff, force_con=True),
+             ImpedanceIntegral(lam, J_k, k_eff, force_con=False),
+             ImpedanceIntegral(lam, J_k, k_eff, force_con=True),
              JointPD(lam, J_k, k_eff)]
     res = {}
     print(f"  {'Controller':<26}{'ApprRMS':>9}{'maxF(N)':>9}{'viol':>6}{'HoldErr':>9}")
@@ -162,15 +162,15 @@ def main():
         res[c.name] = (t, e, F, y, m)
         print(f"  {c.name:<26}{m[0]:>9.3f}{m[1]:>9.3f}{('YES' if m[2] else 'no'):>6}{m[3]:>9.3f}")
 
-    # ── cardiac safety-mode (Impedance MPC + FC) ──────────────────────────────
-    print(f"\n  Cardiac safety mode (Impedance MPC + FC, position tracking):")
+    # ── cardiac force-limited position tracking ───────────────────────────────
+    print(f"\n  Cardiac force-limited position tracking:")
     print(f"    {'wall condition':<40}{'ApprRMS':>9}{'maxF(N)':>9}{'viol':>6}")
     card = []
     for label, short, amp, fh, noise, col in [
             ("static wall (baseline)",            "static wall",          0.0,    1.0, 0.0,    "#27ae60"),
             ("0.3 mm @ 1 Hz",                     "0.3 mm @ 1 Hz",        0.3e-3, 1.0, 0.0,    "#2980b9"),
             ("0.5 mm @ 1.2 Hz + 0.2 mm noise",    "0.5 mm @ 1.2 Hz+noise",0.5e-3, 1.2, 0.2e-3, "#c0392b")]:
-        c = ImpedanceMPC(lam, J_k, k_eff, force_con=True)
+        c = ImpedanceIntegral(lam, J_k, k_eff, force_con=True)
         t, e, F, y = run(model, data, c, cardiac_amp=amp, f_heart=fh, pos_noise=noise)
         m = metrics(t, e, F); card.append((short, t, F, m[1], m[2], col))
         print(f"    {label:<40}{m[0]:>9.3f}{m[1]:>9.3f}{('YES' if m[2] else 'no'):>6}")
@@ -195,10 +195,10 @@ def main():
     print(f"    {'':>6}{'':>7} |{'worstF':>9}{'realF':>8}{'viol':>4}|{'worstF':>10}{'realF':>8}{'viol':>5}")
     for deg in [0, 10, 20, 30]:
         th = math.radians(deg); cth = math.cos(th); sc = cth*cth
-        ca = ImpedanceMPC(lam, J_k, k_eff, force_con=True, f_cap=F_SAFE)
+        ca = ImpedanceIntegral(lam, J_k, k_eff, force_con=True, f_cap=F_SAFE)
         _, _, Fa, _ = run(model, data, ca, tissue_scale=sc)
         realA = float(np.max(Fa))/cth; worstA = F_SAFE/cth                 # nominal cap
-        cb = ImpedanceMPC(lam, J_k, k_eff, force_con=True, f_cap=F_SAFE*math.cos(THETA_MAX))
+        cb = ImpedanceIntegral(lam, J_k, k_eff, force_con=True, f_cap=F_SAFE*math.cos(THETA_MAX))
         _, _, Fb, _ = run(model, data, cb, tissue_scale=sc)
         realB = float(np.max(Fb))/cth; worstB = F_SAFE*math.cos(THETA_MAX)/cth  # tightened
         print(f"    {deg:>4} deg{1/cth:>7.3f} |{worstA:>9.3f}{realA:>8.3f}"
@@ -209,8 +209,8 @@ def main():
     print(f"       theta <= 30 deg, with realized peaks well under the certificate.")
 
     # ── figure 1: four-controller tracking + contact force ────────────────────
-    cols = {"Classical impedance": "#e74c3c", "Impedance MPC (no FC)": "#3498db",
-            "Impedance MPC (with FC)": "#27ae60", "Joint-space PD": "#95a5a6"}
+    cols = {"Classical impedance": "#e74c3c", "Impedance + integral": "#3498db",
+            "Force-limited imp.+int.": "#27ae60", "Joint-space PD": "#95a5a6"}
     fig, ax = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
     for name, (t, e, F, y, m) in res.items():
         ax[0].plot(t, y, color=cols[name], lw=1.6, label=name)
@@ -219,7 +219,7 @@ def main():
     ax[0].axhline(Y_WALL*1e3, color='gray', ls=':', lw=1)
     ax[0].text(0.05, Y_WALL*1e3+0.1, "tissue surface", fontsize=8, color='gray')
     ax[0].set_ylabel("tip-normal pos (mm)"); ax[0].legend(fontsize=8, ncol=2)
-    ax[0].set_title("Catheter tip tracking & contact force (MuJoCo distributed-compliance plant)")
+    ax[0].set_title("Catheter tip tracking and contact force (MuJoCo distributed-compliance plant)")
     ax[1].axhline(F_SAFE, color='r', ls='--', lw=1.2, label="$F_{safe}$ = 0.5 N")
     ax[1].set_ylabel("contact force (N)"); ax[1].set_xlabel("time (s)"); ax[1].legend(fontsize=8)
     ax[0].axvspan(1.5, 2.5, color='orange', alpha=0.06); ax[1].axvspan(1.5, 2.5, color='orange', alpha=0.06)
@@ -236,7 +236,7 @@ def main():
     axc.axvspan(1.5, 2.5, color='orange', alpha=0.06)
     axc.text(2.0, 0.03, "contact hold", ha='center', fontsize=8, color='gray')
     axc.set_xlabel("time (s)"); axc.set_ylabel("contact force (N)")
-    axc.set_title("Safety mode under cardiac wall motion (MuJoCo plant)", fontsize=11)
+    axc.set_title("Force-limited control under cardiac wall motion (MuJoCo plant)", fontsize=11)
     axc.set_xlim(0.8, 2.6); axc.set_ylim(0, 0.6); axc.legend(fontsize=8, loc='upper right')
     figc.tight_layout(); figc.savefig("catheter_cardiac.png", dpi=150)
     print("  figure -> catheter_cardiac.png")

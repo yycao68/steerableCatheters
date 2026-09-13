@@ -62,24 +62,21 @@ def test1_lambda():
     print("="*70); print("#1  Lambda(kappa) configuration-adaptive compliance")
     print("="*70)
     ks=[2.,8.,14.,20.,25.]; Lref=Lambda(ks[0])
-    print(f"  Structural claim: the Lambda(kappa)-normalized gain gives configuration-")
-    print(f"  INDEPENDENT closed-loop poles; a fixed gain (built once at kappa={ks[0]}, "
-          f"Lambda={Lref:.2f}) drifts.")
+    print(f"  Structural check: per-configuration DARE redesign reduces closed-loop")
+    print(f"  pole drift relative to a fixed gain built once at kappa={ks[0]}, "
+          f"Lambda={Lref:.2f}.")
     for Ru,tag in [(1e-3,"benchmark weights"),(1e-7,"aggressive weights")]:
         print(f"\n  --- R_u = {Ru:g} ({tag}) ---")
-        print(f"  {'kappa':>6}{'Lam/Lref':>9}{'  pole(aware)':>14}{'pole(fixed)':>13}")
+        print(f"  {'kappa':>6}{'Lam/Lref':>9}{'pole(scheduled)':>16}{'pole(fixed)':>13}")
         pa=[]; pf=[]
         for k in ks:
             Lt=Lambda(k); a=cl_pole(Lt,Lt,Ru); f=cl_pole(Lt,Lref,Ru); pa.append(a); pf.append(f)
             print(f"  {k:>6.0f}{Lt/Lref:>9.2f}{a:>14.5f}{f:>13.5f}")
-        print(f"  pole spread: aware = {max(pa)-min(pa):.2e} (constant) ; "
+        print(f"  pole spread: scheduled = {max(pa)-min(pa):.2e} ; "
               f"fixed = {max(pf)-min(pf):.4f} (drifts)")
-    print(f"\n  => The aware controller holds the pole spread ~80x tighter (~2e-6) than the")
-    print(f"     fixed gain across the 1.4x inertia variation; the drift grows as control")
-    print(f"     authority increases (R_u down). NOTE: 'aware' here re-solves the LQR per")
-    print(f"     kappa = gain scheduling; it equals a closed-form Lambda(kappa) normalization")
-    print(f"     because the LQR gain scales ~linearly with Lambda (not machine precision,")
-    print(f"     just a small ~2e-6 spread that grows for wider inertia ranges).")
+    print(f"\n  => For the benchmark weights, per-configuration DARE redesign holds the pole")
+    print(f"     spread ~84x tighter (~2e-6) than the fixed gain across the 1.4x inertia")
+    print(f"     variation. This is a reduced-model gain-scheduling check.")
 
 # ── #2 real OSQP constrained solve with a binding tendon limit ────────────────
 def test2_osqp():
@@ -193,11 +190,11 @@ def make_pole_plot():
     pa=[cl_pole(Lambda(k),Lambda(k),R_U) for k in ks]
     pf=[cl_pole(Lambda(k),Lref,R_U) for k in ks]
     fig,ax=plt.subplots(1,2,figsize=(11,4))
-    ax[0].plot(ks,pf,'r.-',label='fixed-$\\Lambda$ gain'); ax[0].plot(ks,pa,'g.-',label='$\\Lambda(\\kappa)$-normalized')
+    ax[0].plot(ks,pf,'r.-',label='fixed-$\\Lambda$ gain'); ax[0].plot(ks,pa,'g.-',label='per-configuration DARE')
     ax[0].set_xlabel('curvature $\\kappa$ (1/m)'); ax[0].set_ylabel('dominant closed-loop pole |z|')
     ax[0].set_title('Pole vs configuration'); ax[0].legend(fontsize=8)
     ax[1].plot(ks,(np.array(pf)-pf[0])*1e4,'r.-',label='fixed-$\\Lambda$')
-    ax[1].plot(ks,(np.array(pa)-pa[0])*1e4,'g.-',label='$\\Lambda(\\kappa)$-norm.')
+    ax[1].plot(ks,(np.array(pa)-pa[0])*1e4,'g.-',label='per-configuration DARE')
     ax[1].set_xlabel('curvature $\\kappa$ (1/m)'); ax[1].set_ylabel('pole drift from $\\kappa$=2  ($\\times10^{-4}$)')
     ax[1].set_title('Pole drift (zoom)'); ax[1].legend(fontsize=8)
     fig.tight_layout(); fig.savefig('catheter_lambda_poles.png',dpi=150)
