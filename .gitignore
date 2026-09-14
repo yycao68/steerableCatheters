@@ -14,6 +14,9 @@ __pycache__/
 
 # Large binaries / logs
 *.mp4
+# ...except the supplementary video a manuscript footnote cites directly --
+# it must survive a fresh clone or the citation can't resolve from one.
+!simulation/safety_comparison.mp4
 *.zip
 MUJOCO_LOG.TXT
 
