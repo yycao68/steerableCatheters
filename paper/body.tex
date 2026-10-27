@@ -10,9 +10,17 @@ Steerable catheter, continuum robot, interaction dynamics, predictive control, K
 
 \subsection{Clinical Motivation}
 
-\IEEEPARstart{S}{teerable} catheters are the primary tool for cardiac electrophysiology (EP) procedures including radiofrequency ablation, where the tip must be positioned precisely at target tissue while maintaining controlled, stable contact. The central control problem is therefore not merely tip tracking and not merely force regulation; it is the regulation of \emph{catheter--tissue interaction dynamics}. The interaction state must encode how the tip moves relative to tissue, how persistent friction and contact forces bias that motion, and how safety limits reshape what motion is physically allowable.
+\IEEEPARstart{S}{teerable} catheters are the primary tool for cardiac electrophysiology (EP) procedures including radiofrequency ablation, 
+where the tip must be positioned precisely at target tissue while maintaining controlled, stable contact. The central control problem is 
+therefore not merely tip tracking and not merely force regulation; it is the regulation of \emph{catheter--tissue interaction dynamics}. 
+The interaction state must encode how the tip moves relative to tissue, how persistent friction and contact forces bias that motion, and 
+how safety limits reshape what motion is physically allowable.
 
-Existing methods regulate these interaction dynamics through different mechanisms. Classical impedance control~\cite{hogan1985} shapes the tip port as a virtual mechanical impedance $Z(s) = M_d s^2 + D_d s + K_d$, providing passive compliance without an explicit contact model. Three complementary design requirements motivate the present formulation: \textbf{(i)}~an explicit force-related constraint, \textbf{(ii)}~compensation for steady error under persistent loading, and \textbf{(iii)}~a prediction model that can incorporate trajectory and actuator information.
+Existing methods regulate these interaction dynamics through different mechanisms. Classical impedance control~\cite{hogan1985} shapes the 
+tip port as a virtual mechanical impedance $Z(s) = M_d s^2 + D_d s + K_d$, providing passive compliance without an explicit contact model. 
+Three complementary design requirements motivate the present formulation: \textbf{(i)}~an explicit force-related constraint, 
+\textbf{(ii)}~compensation for steady error under persistent loading, and \textbf{(iii)}~a prediction model that can incorporate 
+trajectory and actuator information.
 
 \subsection{Challenges Specific to Catheters}
 
